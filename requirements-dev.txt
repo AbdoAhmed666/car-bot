@@ -1,0 +1,4 @@
+-r requirements.txt
+-r requirements-shop.txt
+-r requirements-server.txt
+pytest==8.4.2

@@ -1,0 +1,27 @@
+# data - never commit the distributor's price list
+data/raw/
+data/*.db
+data/*.db-*
+*.xlsx
+*.xls
+*.csv
+!src/synonyms.csv
+
+# secrets
+.env
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# discovery output and database copies - real shop data
+samples.txt
+structure.txt
+probe.txt
+*.bak
+
+# the bot's working files
+data/
+tools/balances.txt

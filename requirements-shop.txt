@@ -1,0 +1,7 @@
+# Where the ELYASSER database is (shop PC, or the laptop with the restored copy):
+# reading it (src/export.py), the demand forecast (src/forecast.py), sending it (src/sync.py).
+pyodbc==5.3.0
+numpy==2.3.3
+scikit-learn==1.7.2
+requests==2.32.5
+python-dotenv==1.0.1

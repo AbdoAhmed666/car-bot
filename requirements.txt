@@ -1,0 +1,5 @@
+# The bot on the laptop, with long polling (python -m src.bot): for testing.
+python-telegram-bot[job-queue]==22.8
+rapidfuzz==3.14.6
+python-dotenv==1.0.1
+tzdata==2025.2
