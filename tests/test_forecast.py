@@ -69,7 +69,7 @@ def test_backtest_and_rows_on_the_fake_shop():
     assert set(scores) == set(forecast.METHODS)
     assert all(0 < v["wape"] < 1 and -1 <= v["bias"] < 1 for v in scores.values())
     rows, meta = forecast.forecast_rows(tables, AS_OF)
-    assert len(rows) == 35 and all(q >= 0 for _, q in rows)
+    assert len(rows) == 36 and all(q >= 0 for _, q in rows)
     best = forecast.best_method(scores)
     assert meta["forecast_method"] == best
     assert float(meta["forecast_wape"]) == pytest.approx(scores[best]["wape"], abs=1e-4)
@@ -87,7 +87,7 @@ def test_forecast_is_made_once_a_day(tmp_path, monkeypatch):
     monkeypatch.setattr(forecast, "forecast_rows", lambda *a, **k: made.append(1) or ([(1, 9.0)], {}))
     tables = export.transform(fake_shop.source_rows())
     same_day, meta = export.with_forecasts(tables, fake_shop.EXPORTED_AT.replace(hour=22), reuse_from=path)
-    assert not made and len(same_day["forecasts"]) == 35 and "forecast_method" in meta
+    assert not made and len(same_day["forecasts"]) == 36 and "forecast_method" in meta
     next_day, _ = export.with_forecasts(tables, datetime(2026, 9, 27, 11), reuse_from=path)
     assert made and next_day["forecasts"] == [(1, 9.0)]
 
@@ -109,7 +109,7 @@ def model_on(shop_cfg, tmp_path):
 
 def test_bot_uses_the_forecast_only_when_it_beat_the_average(shop_cfg, model_on):
     assert Shop(shop_cfg).forecasts() == {}                # lost the backtest: not used
-    assert len(Shop(model_on).forecasts()) == 35
+    assert len(Shop(model_on).forecasts()) == 36
 
     reports = Reports(Shop(model_on), model_on, State(model_on.state_path), as_of=AS_OF)
     card = reports.ask("موبينه سيراتو").text

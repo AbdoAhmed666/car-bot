@@ -52,7 +52,7 @@ class Reports:
         items = self.shop.items()
         sales = self.shop.sales_by_item(now - timedelta(days=days), self.as_of)
         last = self.shop.last_sales(self.as_of)
-        return items, analysis.views(items, sales, last, days, self.shop.forecasts())
+        return items, analysis.views(items, sales, last, days, self.shop.forecasts(), self.shop.arrivals(self.as_of))
 
     def _today(self):
         """(period, label) for "today so far"."""
@@ -75,8 +75,26 @@ class Reports:
             self.shop.customers(), sales(now - timedelta(days=CUSTOMER_WINDOW), end), sales(None, end),
             self.shop.purchase_days(end), self.shop.balances(end, since=cutoff),
             recent=sales(cutoff, end), before=sales(None, cutoff), now=now)
-        analysis.rate(cvs.values(), now)
+        analysis.rate(cvs.values(), now, self.cfg.collect_weeks * 7)
         return cvs
+
+    def _collect(self, cvs=None):
+        """About how many days money stays with traders across the shop."""
+        return analysis.shop_collect_days((cvs or self._customer_views()).values())
+
+    def _sales(self, period):
+        """(who bought what, {item id: who took it}, the lines) for a report's period."""
+        detail = self.shop.sales_detail(period)
+        return (analysis.sales_by_customer(self.shop.invoices(period), detail),
+                analysis.buyers_by_item(detail), detail)
+
+    @staticmethod
+    def _sales_button(period, groups):
+        """The button to every customer and item of the report, by invoice ids."""
+        ids = [i for g in groups for i in g["invoices"]]
+        if not ids:
+            return []
+        return [[(messages.BUTTON_SALES, f"sales:{min(ids) - 1}:{max(ids)}")]]
 
     def _model_note(self):
         """(method, its error, the plain average's error) when a forecast is in use, for the weekly report."""
@@ -89,7 +107,7 @@ class Reports:
         now = self.now()
         return {"low": analysis.needed(vs.values(), self.cfg.low_stock_days, self.cfg.min_sold),
                 "idle": analysis.idle(vs.values(), now, self.cfg.idle_days),
-                "slow": analysis.slow_movers(vs.values())}
+                "slow": analysis.slow_movers(vs.values(), new_since=now - timedelta(days=self.cfg.velocity_days))}
 
     # --- answers ---------------------------------------------------------------
 
@@ -120,7 +138,10 @@ class Reports:
         _, vs = self._views()
         if item_id not in vs:
             return Reply("الصنف ده مش موجود دلوقتي.")
-        return Reply(self._stamp(messages.item_card(vs[item_id], self.cfg.velocity_days, self.cfg.low_stock_days)))
+        now = self.now()
+        history = self.shop.item_history(item_id, now - timedelta(days=self.cfg.velocity_days), self.as_of, limit=4)
+        return Reply(self._stamp(messages.item_card(vs[item_id], self.cfg.velocity_days, self.cfg.low_stock_days,
+                                                    history, now)))
 
     def customer(self, customer_id) -> Reply:
         cvs = self._customer_views()
@@ -128,7 +149,8 @@ class Reports:
             return Reply("العميل ده مش موجود.")
         v, now = cvs[customer_id], self.now()
         top = self.shop.customer_items(customer_id, None, self.as_of, limit=5)
-        return Reply(self._stamp(messages.customer_card(v, top, now)))
+        return Reply(self._stamp(messages.customer_card(v, top, now, self.cfg.collect_weeks,
+                                                        self.cfg.money_cost_monthly)))
 
     def customers(self) -> Reply:
         cvs, now = self._customer_views(), self.now()
@@ -143,12 +165,35 @@ class Reports:
                 [(f"💳 المديونيات ({len(owing)})", "open:debt")] if owing else [],
                 ([(f"⏰ متأخرين في الدفع ({len(late)})", "open:late")] if late else [])
                 + ([(f"بطّلوا يشتروا ({len(stopped)})", "open:stopped")] if stopped else [])]
-        text = messages.customers_report(top, levels, new, now, CUSTOMER_WINDOW, owing)
+        text = messages.customers_report(top, levels, new, now, CUSTOMER_WINDOW, owing,
+                                         self._collect(cvs), self.cfg.collect_weeks)
         return Reply(self._stamp(text), [row for row in rows if row])
 
     def today(self) -> Reply:
         period, label = self._today()
-        return Reply(self._stamp(messages.today(self.now(), self._totals(period), label)))
+        groups, _, _ = self._sales(period)
+        text = messages.today(self.now(), self._totals(period), label, groups, self._collect(),
+                              self.cfg.money_cost_monthly)
+        return Reply(self._stamp(text), self._sales_button(period, groups))
+
+    def sales_page(self, after, upto, number=0) -> Reply:
+        """Every customer and item of the invoices after `after` up to `upto`, a page at a time."""
+        period = Period(after={"sal": after}, upto={"sal": upto})
+        groups, _, _ = self._sales(period)
+        dates = [d for d in (x["date"] for x in self.shop.invoices(period)) if d]
+        title = ""
+        if dates:
+            first, last = min(dates), max(dates)
+            title = messages.weekday(first) if first.date() == last.date() else f"{messages.day(first)} لـ {messages.day(last)}"
+        text = messages.sales_page(groups, title, number)
+        pages = max(1, (len(groups) + messages.SALES_PAGE - 1) // messages.SALES_PAGE)
+        number = min(max(number, 0), pages - 1)
+        nav = []
+        if number < pages - 1:
+            nav.append(("التالي ◀", f"sales:{after}:{upto}:{number + 1}"))
+        if number > 0:
+            nav.append(("▶ السابق", f"sales:{after}:{upto}:{number - 1}"))
+        return Reply(self._stamp(text), [nav] if nav else [])
 
     def list_page(self, kind, number=0) -> Reply:
         """One page of a long list, with buttons to turn pages."""
@@ -220,11 +265,13 @@ class Reports:
         period, label = self._today()
         items = self.shop.items()
         snapshot = self.state.snapshot()
+        groups, buyers, _ = self._sales(period)
         text = messages.daily_update(self.now(), self._totals(period), analysis.changes(snapshot, items),
-                                     first_time=not snapshot, since_text=label)
+                                     first_time=not snapshot, since_text=label, groups=groups, buyers=buyers,
+                                     collect=self._collect(), money_cost=self.cfg.money_cost_monthly)
         if save:
             self.state.save_snapshot(items)
-        return Reply(self._stamp(text))
+        return Reply(self._stamp(text), self._sales_button(period, groups))
 
     def end_of_day(self, save=True) -> Reply:
         """The day's sales, and only the alerts that matter."""
@@ -234,9 +281,9 @@ class Reports:
             ids = self.shop.last_ids()          # fixed first, so nothing slips between query and save
             after = self.state.get("eod_ids")
             period = Period(after=after, upto=ids) if after else Period(start=_day_start(self.now()))
-        items, vs = self._views()
-        lines = self.shop.sale_lines(period)
-        sold_today = {line["item"] for line in lines}
+        _, vs = self._views()
+        groups, buyers, lines = self._sales(period)
+        sold_today = {line["item_id"] for line in lines}
         low_days, min_sold = self.cfg.low_stock_days, self.cfg.min_sold
 
         went_negative = [vs[i].item for i in sold_today if i in vs and vs[i].item.stock < 0]
@@ -250,10 +297,10 @@ class Reports:
             losing=analysis.losing_lines(lines),
             deleted=self.shop.deleted_lines(period),
             went_negative=went_negative,
-            item_names={i.id: i.name for i in items})
+            groups=groups, buyers=buyers, collect=self._collect(), money_cost=self.cfg.money_cost_monthly)
         if save and ids is not None:
             self.state.set("eod_ids", ids)
-        return Reply(self._stamp(text))
+        return Reply(self._stamp(text), self._sales_button(period, groups))
 
     def weekly(self) -> Reply:
         now = self.now()
@@ -277,7 +324,8 @@ class Reports:
                                lists["slow"], analysis.below_cost(items), analysis.negative_stock(items),
                                top_customer=best, stopped=analysis.stopped_buying(cvs.values(), now),
                                model=self._model_note(),
-                               owed=sum(v.balance for v in analysis.owing(cvs.values())), risky=risky)
+                               owed=sum(v.balance for v in analysis.owing(cvs.values())), risky=risky,
+                               collect=self._collect(cvs), money_cost=self.cfg.money_cost_monthly)
         buttons = [[(f"{messages.BUTTON_LOW} ({len(lists['low'])})", "open:low"),
                     (f"{messages.BUTTON_IDLE} ({len(lists['idle'])})", "open:idle")],
                    [(f"🐢 البطيء ({len(lists['slow'])})", "open:slow")]]

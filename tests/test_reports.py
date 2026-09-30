@@ -8,7 +8,7 @@ import pytest
 
 from src import messages
 from src.reports import Reports
-from src.shop import Shop
+from src.shop import Period, Shop
 from src.state import State
 
 AS_OF = datetime(2026, 9, 26, 23, 30)       # fake_shop.ANCHOR, late evening
@@ -29,7 +29,7 @@ def own_snapshot(shop_cfg, tmp_path):
 
 def test_check(shop_cfg):
     r = Shop(shop_cfg).check()
-    assert r["items"] == 35 and r["invoices"] > 1000 and r["customers"] == 13
+    assert r["items"] == 36 and r["invoices"] > 1000 and r["customers"] == 13
     assert r["exported_at"] == datetime(2026, 9, 26, 18, 0)
 
 
@@ -76,9 +76,59 @@ def test_idle_and_slow(reports):
     money = [float(line.split(" · ")[1].split(" ج")[0].replace(",", "")) for line in lines if line.startswith("• ")]
     assert len(money) == 6 and money == sorted(money, reverse=True)              # the most money first
     assert any(line.startswith("• تيش ميزان خلفي بوما CTR") for line in lines)   # padding gone
-    assert any(line.startswith("• خرطوم تكيف سيراتو 2015: 10 قطع · ") and line.endswith("· متباعش خالص")
+    assert any(line.startswith("• خرطوم تكيف سيراتو 2015: 10 قطع · ") and "· متباعش خالص · آخر وارد من" in line
                for line in lines)
+    assert "مساعدين امامي كروز" not in reports.idle().text        # arrived 10 days ago: not idle yet
     assert "سيلكون المانى فكتور رانز" in reports.list_page("slow").text
+
+
+def test_idle_waits_for_new_goods():
+    """In stock and never sold is idle only once it has been in the shop for idle_days."""
+    from src import analysis
+    from src.shop import Item
+    now, item = datetime(2026, 9, 26), Item(1, "مساعدين", "", 12, 600, 460)
+    def idle(arrived):
+        v = analysis.ItemView(item=item, last_arrival=arrived)
+        return analysis.idle([v], now, 90)
+    assert idle(None) and idle(datetime(2026, 5, 1))                    # unknown, or here for months
+    assert not idle(datetime(2026, 9, 16))                              # arrived 10 days ago
+    fresh = analysis.ItemView(item=item, sold=1, per_day=1 / 60, first_arrival=datetime(2026, 9, 16))
+    assert analysis.slow_movers([fresh], new_since=datetime(2026, 7, 28)) == []
+    assert analysis.slow_movers([fresh]) == [fresh]
+
+
+def test_item_card_says_who_bought_it(reports):
+    text = reports.ask("كويل لانوس").text
+    took = text.split("👥 مين أخده: ")[1].split("\n")[0]
+    assert took.startswith("7 لمركز النجمة، ")
+    last = text.split("🧾 آخر بيع:\n")[1].split("\n📥")[0].splitlines()
+    assert len(last) == 4 and last[0].startswith("• 26/9 · ") and " × 800 ج · فاتورة " in last[0]
+    assert "📥 آخر وارد: 1/9 (من 25 يوم)" in text
+    fresh = reports.ask("مساعدين امامي كروز").text
+    assert "📥 آخر وارد: 16/9 (من 10 أيام)" in fresh and "👥" not in fresh
+
+
+def test_today_says_who_bought_what(reports):
+    reply = reports.today()
+    text = reply.text
+    assert "💳 آجل " in text and "المكسب بعد تكلفة الآجل حوالي" in text and "(تقدير)" in text
+    block = text.split("👥 مين اشترى (")[1]
+    assert block.startswith("6):\n• مركز النجمة: ")
+    assert "🛒 " in block and "كويل لانوس" in block
+    assert reply.buttons == [[(messages.BUTTON_SALES, reply.buttons[0][0][1])]]
+    after, upto = map(int, reply.buttons[0][0][1].split(":")[1:])
+
+    # the details: every customer and item, money matching the invoices
+    first = reports.sales_page(after, upto)
+    assert first.text.startswith("🧾 تفاصيل البيع · السبت 26/9") and "(صفحة 1 من 2)" in first.text
+    assert first.buttons == [[("التالي ◀", f"sales:{after}:{upto}:1")]]
+    second = reports.sales_page(after, upto, 1)
+    assert second.buttons == [[("▶ السابق", f"sales:{after}:{upto}:0")]]
+    invoices = reports.shop.invoices(Period(after={"sal": after}, upto={"sal": upto}))
+    shown = [float(line.split(": ")[1].split(" ج")[0].replace(",", ""))
+             for page in (first, second) for line in page.text.splitlines() if line.startswith("👤 ")]
+    assert sum(shown) == pytest.approx(sum(i["total"] for i in invoices))
+    assert "• 3 كويل لانوس · 2,400 ج" in first.text
 
 
 def test_paging(reports, monkeypatch):
@@ -96,8 +146,9 @@ def test_end_of_day(reports):
     assert text.startswith("🌙 آخر اليوم · السبت 26/9")
     assert "↩️ مرتجع" in text
     alerts = text.split("⚠️ محتاج تبص عليه:")[1]
-    assert "كويل لانوس" in alerts.split("• قرب يخلص")[0]           # ran out today
-    assert "• اتباع بخسارة: مشترك ريداتير كياسول بالغطاء" in alerts
+    assert "كويل لانوس (3 لمركز النجمة و1 لمعرض الشروق)" in alerts.split("• قرب يخلص")[0]   # ran out today
+    assert "• اتباع بخسارة: مشترك ريداتير كياسول بالغطاء" in alerts and "لنقــــدى)" in alerts
+    assert "👥 مين اشترى" in text
     assert "فلتر زيت تويوتا" in alerts.split("• اتمسح من الفواتير")[1]
 
 
@@ -110,7 +161,7 @@ def test_weekly_is_short_and_leads_with_actions(reports):
     assert "1. اطلب الناقص" in todo
     assert "2. 🔴" in todo and "ممكن يعملولك مشكلة" in todo and "قلّل الآجل" in todo
     assert "3. عميلين بطّلوا يشتروا، أهمهم ورشة الأمانة" in todo
-    assert "💳 على العملاء:" in text
+    assert "💳 على العملاء:" in text and "⏳ بعد تكلفة الآجل: حوالي" in text
     assert "🏆 أكتر صنف كسّب" in text and "👥 أكبر عميل: مركز النجمة" in text
     data = [d for row in reply.buttons for _, d in row]
     assert data == ["open:low", "open:idle", "open:slow", "open:risk"]
@@ -203,6 +254,9 @@ def test_customers_report(reports):
     assert "💳 على العملاء:" in text and "🟢 كمّل معاهم" in text and "🔴 خطر" in text
     risky = text.split("🔴 ممكن يعملولك مشكلة:")[1].split("\n\n")[0]
     assert "مؤسسة التوفيق (عليه" in risky and "مدفعش من" in risky
+    # pays every 10 days, yet keeps about 12 weeks of purchases: risky, not "keep going"
+    assert "معرض الشروق (عليه" in risky and "فلوسه بتقعد عنده" in risky
+    assert "⏱️ التحصيل: الفلوس بتقعد عند التجار حوالي" in text and "(المفروض 6 أسابيع)" in text
     assert [d for row in reply.buttons for _, d in row] == [
         "open:risk", "open:watch", "open:good", "open:cust", "open:debt", "open:late", "open:stopped"]
 
@@ -243,6 +297,10 @@ def test_customer_card_shows_what_they_owe(reports):
     assert "آخر دفعة:" in text and "⚠️ مدفعش من" in text
     text = reports.ask("مركز النجمة").text
     assert "💳 عليه:" in text and "آخر دفعة:" in text and "مدفعش" not in text
+    assert "✅ التحصيل كويس: فلوسه بترجع في حوالي" in text and "⏱️" not in text     # said once
+    assert "⏳ بعد تكلفة الآجل: حوالي" in text and "تقدير" in text
+    slow = reports.ask("معرض الشروق").text
+    assert "⚠️ التحصيل بطيء: فلوسه بتقعد عنده حوالي" in slow and "والمفروض 6 أسابيع" in slow
 
 
 def test_verdict_lists(reports):

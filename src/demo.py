@@ -27,10 +27,13 @@ SAMPLES = ["تقرير الأسبوع", "فاضل كام من طلمبه باو�
 
 
 def build(path=DEMO) -> Path:
-    """The made-up shop's snapshot, with its demand forecast (made once, ~10 s)."""
+    """The made-up shop's snapshot, with its demand forecast (made once, ~10 s, and
+    again whenever tests/fake_shop.py or the export changes)."""
     from tests import fake_shop
-    if not path.exists():
-        print("building the made-up shop (once)...", file=sys.stderr)
+    from . import export
+    sources = [Path(fake_shop.__file__), Path(export.__file__)]
+    if not path.exists() or path.stat().st_mtime < max(f.stat().st_mtime for f in sources):
+        print("building the made-up shop...", file=sys.stderr)
         fake_shop.snapshot(path)
     return path
 

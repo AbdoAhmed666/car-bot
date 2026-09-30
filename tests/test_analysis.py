@@ -138,10 +138,10 @@ def _signs(v, margin=0.22):
 
 
 def test_verdict_good_customer():
-    assert _signs(_cv()) == ("good", [], ["pays_well"])
+    assert _signs(_cv()) == ("good", [], ["pays_well", "collects_ok"])        # owes a month of purchases
     assert _signs(_cv(balance=0, balance_before=0)) == ("good", [], ["pays_well", "clear"])
     assert _signs(_cv(balance=-40_000, balance_before=0))[2] == ["pays_well"]      # the shop owes them: not "clear"
-    assert _signs(_cv(recent_monthly=30_000))[2] == ["pays_well", "buys_more"]
+    assert _signs(_cv(recent_monthly=30_000))[2] == ["pays_well", "collects_ok", "buys_more"]
 
 
 def test_verdict_signs_and_how_serious():
@@ -154,14 +154,23 @@ def test_verdict_signs_and_how_serious():
     level, bad, _ = _signs(_cv(last_payment=NOW - timedelta(days=40), paid_recent=0, balance=60_000))
     assert level == "risk" and bad[0] == "not_paying"
     # takes much more than they pay, and the debt grows
-    assert _signs(_cv(paid_recent=24_000, balance=56_000))[:2] == ("risk", ["takes_more"])
-    assert _signs(_cv(paid_recent=42_000, balance=38_000))[:2] == ("watch", ["takes_more"])
-    # what they owe, in months of what they take
-    assert _signs(_cv(balance=80_000, balance_before=80_000))[:2] == ("watch", ["debt_months"])      # 4 months
-    assert _signs(_cv(balance=140_000, balance_before=140_000))[:2] == ("risk", ["debt_months"])     # 7 months
-    # ... unless they are bringing it down: paying more than they take
-    assert _signs(_cv(balance=80_000, balance_before=100_000, paid_recent=80_000)) == ("good", [], ["pays_well"])
-    assert _signs(_cv(balance=140_000, balance_before=160_000, paid_recent=80_000))[:2] == ("watch", ["debt_months"])
+    level, bad, _ = _signs(_cv(paid_recent=24_000, balance=56_000))
+    assert level == "risk" and bad[0] == "takes_more"
+    level, bad, _ = _signs(_cv(paid_recent=42_000, balance=38_000))
+    assert level == "watch" and bad[0] == "takes_more"
+    # how long their money stays out, in days of what they take on credit: 6 weeks is the norm
+    assert _signs(_cv(balance=25_000, balance_before=25_000))[:2] == ("good", [])                 # 38 days
+    assert _signs(_cv(balance=40_000, balance_before=40_000))[:2] == ("watch", ["slow_collect"])  # 60 days
+    assert _signs(_cv(balance=80_000, balance_before=80_000))[:2] == ("risk", ["slow_collect"])   # 120 days
+    # paying on time, but holding four months of purchases: not "keep going" any more
+    level, bad, good = _signs(_cv(balance=80_000, balance_before=80_000))
+    assert "pays_well" in good and level == "risk"
+    # ... less serious when they are bringing it down: paying more than they take
+    assert _signs(_cv(balance=80_000, balance_before=100_000, paid_recent=80_000)) == \
+        ("watch", ["slow_collect"], ["pays_well"])
+    assert _signs(_cv(balance=140_000, balance_before=160_000, paid_recent=80_000))[:2] == ("watch", ["slow_collect"])
+    # the shop's norm is a setting
+    assert analysis.assess(_cv(balance=40_000, balance_before=40_000), NOW, 0.22, collect_days=70).level == "good"
     # buys much less than before, earns little, sends much back
     assert _signs(_cv(recent_monthly=8_000))[:2] == ("watch", ["buys_less"])
     assert _signs(_cv(life_profit=16_000))[:2] == ("watch", ["low_margin"])                          # 8% vs 22%

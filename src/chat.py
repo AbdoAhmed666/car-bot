@@ -124,6 +124,13 @@ class Chat:
             list_kind, _, number = rest.partition(":")
             if number.isdigit():
                 return [self._out(lambda: r.list_page(list_kind, int(number)), edit=True)]
+        if kind == "sales" and hasattr(r, "sales_page"):
+            # "sales:after:upto" under a report opens the details as a new message;
+            # "sales:after:upto:page" turns its pages
+            parts = rest.split(":")
+            if len(parts) in (2, 3) and all(x.isdigit() for x in parts):
+                after, upto, number = int(parts[0]), int(parts[1]), int(parts[2]) if len(parts) == 3 else 0
+                return [self._out(lambda: r.sales_page(after, upto, number), edit=len(parts) == 3)]
         return []
 
     def scheduled(self, which) -> Out:

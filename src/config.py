@@ -27,7 +27,7 @@ class Config:
     weekly_time: time
     velocity_days: int             # sales window for "sells N a day"
     low_stock_days: int            # warn when stock lasts fewer days than this
-    idle_days: int                 # no sale for this long = idle stock
+    idle_days: int                 # no sale and nothing arrived for this long = idle stock
     min_sold: int                  # sold at least this many in the window to count as "selling"
     state_path: Path
     snapshot_path: Path = None     # the SQLite copy of the shop data the bot reads (src/export.py)
@@ -35,6 +35,8 @@ class Config:
     upload_token: str = ""         # shared secret between src/sync.py and the server's /upload
     webhook_secret: str = ""       # Telegram sends it with every update, so the server knows it's Telegram
     as_of: datetime = None         # testing on an old copy: act as if it were this moment
+    collect_weeks: float = 6       # the shop expects credit to be paid within this many weeks
+    money_cost_monthly: float = 2  # % a month money earns elsewhere: the cost of money left with traders
 
 
 def _time(value: str) -> time:
@@ -71,4 +73,6 @@ def load(env_file=None) -> Config:
         upload_token=env("UPLOAD_TOKEN", "").strip(),
         webhook_secret=env("WEBHOOK_SECRET", "").strip(),
         as_of=datetime.strptime(env("AS_OF"), "%Y-%m-%d %H:%M") if env("AS_OF", "").strip() else None,
+        collect_weeks=float(env("COLLECT_WEEKS", "6")),
+        money_cost_monthly=float(env("MONEY_COST_MONTHLY", "2")),
     )

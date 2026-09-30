@@ -158,14 +158,58 @@ class Shop:
         return [{"id": r["id"], "date": _dt(r["date"]), "customer": r["customer_id"], "total": r["total"],
                  "profit": r["profit"], "discount": r["discount"], "credit": bool(r["credit"])} for r in rows]
 
-    def sale_lines(self, period) -> list:
+    def sales_detail(self, period) -> list:
+        """Every sale line in the period with its invoice, customer and item names, oldest invoice first."""
         where, params = _where(period, "i.id", "i.date", "sal")
         rows = self._rows(f"""
-            SELECT l.invoice_id, l.item_id, l.qty, l.price, l.total, l.profit
+            SELECT i.id AS invoice, i.date, i.customer_id, i.credit, c.name AS customer, it.name AS item,
+                   l.item_id, l.qty, l.price, l.total, l.profit
             FROM invoice_lines l JOIN invoices i ON i.id = l.invoice_id
-            WHERE {where} ORDER BY l.invoice_id""", params)
-        return [{"invoice": r["invoice_id"], "item": r["item_id"], "qty": r["qty"], "price": r["price"],
-                 "total": r["total"], "profit": r["profit"]} for r in rows]
+            LEFT JOIN customers c ON c.id = i.customer_id
+            LEFT JOIN items it ON it.id = l.item_id
+            WHERE {where} ORDER BY i.id, l.id""", params)
+        return [{**r, "date": _dt(r["date"]), "credit": bool(r["credit"]), "customer": r["customer"] or "",
+                 "item": r["item"] or ""} for r in rows]
+
+    def item_history(self, item_id, start=None, end=None, limit=5) -> dict:
+        """Who bought this item: {"last": the latest sale lines (newest first), "buyers":
+        [(customer, pieces)] since `start`, most first}."""
+        cond = ["l.item_id = ?"] + (["i.date < ?"] if end else [])
+        params = [item_id] + ([_d(end)] if end else [])
+        last = self._rows(f"""
+            SELECT i.id AS invoice, i.date, c.name AS customer, l.qty, l.price
+            FROM invoice_lines l JOIN invoices i ON i.id = l.invoice_id
+            LEFT JOIN customers c ON c.id = i.customer_id
+            WHERE {" AND ".join(cond)} ORDER BY i.date DESC, i.id DESC LIMIT {int(limit)}""", params)
+        if start:
+            cond.append("i.date >= ?")
+            params.append(_d(start))
+        buyers = self._rows(f"""
+            SELECT c.name AS customer, SUM(l.qty) AS qty
+            FROM invoice_lines l JOIN invoices i ON i.id = l.invoice_id
+            LEFT JOIN customers c ON c.id = i.customer_id
+            WHERE {" AND ".join(cond)} GROUP BY i.customer_id ORDER BY qty DESC""", params)
+        return {"last": [{**r, "date": _dt(r["date"]), "customer": r["customer"] or ""} for r in last],
+                "buyers": [(r["customer"] or "", r["qty"]) for r in buyers if r["qty"] > 0]}
+
+    def arrivals(self, end=None) -> dict:
+        """{item id: (first, last) time stock came in from a supplier}; empty for a
+        snapshot from before arrivals were exported. With `end`, what was known then
+        (the latest arrival before it is not kept, so the first stands in for it)."""
+        try:
+            rows = self._rows("SELECT item_id, first_in, last_in FROM arrivals")
+        except ShopUnavailable:
+            return {}
+        out = {}
+        for r in rows:
+            first, last = _dt(r["first_in"]), _dt(r["last_in"])
+            if first and end and first >= end:
+                continue
+            if last and end and last >= end:
+                last = first
+            if first or last:
+                out[r["item_id"]] = (first or last, last or first)
+        return out
 
     def returns(self, period) -> list:
         where, params = _where(period, "id", "date", "rsal")

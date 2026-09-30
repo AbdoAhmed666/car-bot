@@ -4,7 +4,7 @@ Short on purpose: every message fits a phone screen and opens with what to
 do. Long lists come 10 at a time behind buttons. Plain text (no Markdown),
 so item names with symbols in them can't break the formatting.
 """
-from .analysis import reorder_qty, weekly_value
+from .analysis import margin_after_credit, reorder_qty, weekly_value
 
 WEEKDAYS = ["الاتنين", "التلات", "الأربع", "الخميس", "الجمعة", "السبت", "الحد"]
 
@@ -16,6 +16,7 @@ BUTTON_CUSTOMERS = "👥 العملاء"
 BUTTONS = [[BUTTON_TODAY, BUTTON_WEEK], [BUTTON_LOW, BUTTON_IDLE], [BUTTON_CUSTOMERS]]
 
 PAGE = 10             # list lines per message
+SALES_PAGE = 5        # customers per page of the sales details
 METHOD_NAMES = {"model": "موديل تعلّم آلي", "blend": "موديل تعلّم آلي مع متوسط 13 أسبوع",
                 "average_13_weeks": "متوسط آخر 13 أسبوع", "croston": "طريقة Croston للبيع المتقطع"}
 
@@ -50,6 +51,10 @@ def items_n(n):
 
 def days_n(n):
     return plural(n, "يوم واحد", "يومين", "أيام", "يوم")
+
+
+def weeks_n(n):
+    return plural(n, "أسبوع واحد", "أسبوعين", "أسابيع", "أسبوع")
 
 
 def months_n(n):
@@ -107,6 +112,26 @@ def weekday(d) -> str:
     return f"{WEEKDAYS[d.weekday()]} {day(d)}"
 
 
+def qty_text(q) -> str:
+    """2 or 1.5: pieces as the program has them."""
+    return f"{q:,.0f}" if abs(q - round(q)) < 0.01 else f"{q:,.1f}"
+
+
+def to_whom(name) -> str:
+    """"لمركز النجمة", "للزراني": "for" joined to a name, as it is written in Arabic."""
+    if name.startswith("ال"):
+        return "لل" + name[2:]
+    return ("ل" if name and "\u0621" <= name[0] <= "\u064a" else "لـ") + name
+
+
+def buyers_text(buyers, limit=3) -> str:
+    """"2 لمركز النجمة و6 لورشة الفجر": who took how many, most first."""
+    shown = [f"{qty_text(q)} {to_whom(name)}" for name, q in buyers[:limit]]
+    if len(buyers) > limit:
+        shown.append(plural(len(buyers) - limit, "عميل تاني", "عميلين كمان", "عملاء كمان", "عميل كمان"))
+    return "، ".join(shown[:-1]) + " و" + shown[-1] if len(shown) > 1 else "".join(shown)
+
+
 def names(things, limit=3) -> str:
     """"أ، ب، ج و5 كمان"."""
     shown = "، ".join(things[:limit])
@@ -121,10 +146,17 @@ def stock_text(stock) -> str:
     return pieces(stock)
 
 
-def sales_line(t) -> list:
+def sales_line(t, collect=None, money_cost=2) -> list:
+    """The day's sales; `collect` (days money stays with traders) adds what the credit costs."""
     if not t["count"] and not t["returns_count"]:
         return ["💵 مفيش فواتير بيع"]
     out = [f"💵 {invoices_n(t['count'])} · {money(t['total'])} · مكسب {money(t['profit'])} ({pct(t['profit'], t['total'])})"]
+    if t["total"] > 0 and t.get("credit_total"):
+        pay = f"💳 آجل {money(t['credit_total'])} · كاش {money(t['total'] - t['credit_total'])}"
+        if collect and t["profit"] > 0:
+            after = margin_after_credit(t["profit"] / t["total"], t["credit_total"] / t["total"], collect, money_cost)
+            pay += f" · المكسب بعد تكلفة الآجل حوالي {after * 100:.0f}% (تقدير)"
+        out.append(pay)
     if t["returns_count"]:
         out.append(f"↩️ مرتجع: {invoices_n(t['returns_count'])} بـ {money(t['returns_total'])}")
     return out
@@ -132,7 +164,8 @@ def sales_line(t) -> list:
 
 # --- one item ----------------------------------------------------------------
 
-def item_card(v, window_days, low_days) -> str:
+def item_card(v, window_days, low_days, history=None, now=None) -> str:
+    """history: shop.item_history(), who bought it lately and the last invoices."""
     i = v.item
     lines = [f"📦 {i.name}" + (f"  (كود {i.code})" if i.code else ""),
              f"الرصيد: {stock_text(i.stock)}"]
@@ -145,6 +178,8 @@ def item_card(v, window_days, low_days) -> str:
     if v.sold > 0:
         pace = f" (حوالي {v.per_day * 7:,.1f} في الأسبوع)" if v.forecast_30 is None else ""
         lines.append(f"آخر {window_days} يوم: اتباع منه {pieces(v.sold)}{pace}")
+        if history and history["buyers"]:
+            lines.append(f"👥 مين أخده: {buyers_text(history['buyers'], limit=4)}")
     else:
         lines.append(f"مفيش بيع منه في آخر {window_days} يوم")
     if v.forecast_30 is not None and (v.sold > 0 or demand_30 >= 0.5):
@@ -157,7 +192,14 @@ def item_card(v, window_days, low_days) -> str:
             lines.append(f"الرصيد يكفي {cover_text(cover)}{warn}")
         elif i.stock <= 0:
             lines.append(f"⛔ خلص وعليه طلب. اطلب حوالي {pieces(reorder_qty(v))} تكفي شهر")
-    lines.append(f"آخر بيع: {day(v.last_sale)}" if v.last_sale else "متباعش ولا مرة من ساعة ما البرنامج اشتغل")
+    if history and history["last"]:
+        lines.append("🧾 آخر بيع:")
+        lines += [f"• {day(x['date'])} · {x['customer']} · {qty_text(x['qty'])} × {money(x['price'])} · فاتورة {x['invoice']}"
+                  for x in history["last"]]
+    else:
+        lines.append(f"آخر بيع: {day(v.last_sale)}" if v.last_sale else "متباعش ولا مرة من ساعة ما البرنامج اشتغل")
+    if v.last_arrival and now:
+        lines.append(f"📥 آخر وارد: {day(v.last_arrival)} ({ago_text(v.last_arrival, now)})")
     return "\n".join(lines)
 
 
@@ -191,11 +233,13 @@ def low_header(needed, low_days) -> str:
 
 
 def idle_line(v, now) -> str:
-    return f"• {v.item.name}: {pieces(v.item.stock)} · {money(v.money)} · {last_sale_text(v.last_sale, now)}"
+    came = f" · آخر وارد {ago_text(v.last_arrival, now)}" if v.last_arrival else ""
+    return f"• {v.item.name}: {pieces(v.item.stock)} · {money(v.money)} · {last_sale_text(v.last_sale, now)}{came}"
 
 
 def idle_header(idle, idle_days) -> str:
-    return (f"💤 الراكد: {items_n(len(idle))} متباعش من {days_n(idle_days)} · فيهم {short_money(sum(v.money for v in idle))}\n"
+    return (f"💤 الراكد: {items_n(len(idle))} متباعش ولا وصل منهم جديد من {days_n(idle_days)} · "
+            f"فيهم {short_money(sum(v.money for v in idle))}\n"
             "الأكبر فلوس الأول. اللي عدّى عليه سنة: خصم أو رجّعه للمورد.")
 
 
@@ -267,9 +311,14 @@ def sign_text(sign, d, short=False) -> str:
     if sign == "takes_more":
         paid = f"دفع {d['ratio'] * 100:.0f}% بس من اللي أخده آخر 3 شهور"
         return paid if short else f"بياخد أكتر ما بيدفع: {paid}، ومديونيته زادت {short_money(d['growth'])}"
-    if sign == "debt_months":
-        months = months_n(round(d["months"]))
-        return f"ده مشتريات {months}" if short else f"اللي عليه ({short_money(d['balance'])}) = مشترياته في {months}"
+    if sign == "slow_collect":
+        weeks = weeks_n(round(d["weeks"]))
+        down = "، بس بيقلّل اللي عليه" if d["shrinking"] else ""
+        return (f"فلوسه بتقعد عنده {weeks}" if short else
+                f"التحصيل بطيء: فلوسه بتقعد عنده حوالي {weeks} والمفروض {weeks_n(round(d['norm']))}{down}")
+    if sign == "collects_ok":
+        return (f"بيسدّد في {weeks_n(max(round(d['weeks']), 1))}" if short else
+                f"التحصيل كويس: فلوسه بترجع في حوالي {weeks_n(max(round(d['weeks']), 1))}")
     if sign == "buys_less":
         less = f"مشترياته قلّت {-d['change'] * 100:.0f}%"
         return less if short else f"{less}: بقى بـ {short_money(d['now'])} في الشهر بدل {short_money(d['before'])}"
@@ -295,25 +344,46 @@ def sign_text(sign, d, short=False) -> str:
     return sign
 
 
+def shown_signs(v) -> tuple:
+    """(bad, good) signs a customer's card shows: the good ones only when nothing is wrong."""
+    if not v.verdict:
+        return [], []
+    good = v.verdict.good[:2] if v.verdict.level in ("good", "new") or not v.verdict.bad else []
+    return v.verdict.bad[:3], good
+
+
 def verdict_lines(v) -> list:
     if not v.verdict:
         return []
-    lines = [LEVELS[v.verdict.level]]
-    lines += [f"⚠️ {sign_text(*b)}" for b in v.verdict.bad[:3]]
-    if v.verdict.level in ("good", "new") or not v.verdict.bad:
-        lines += [f"✅ {sign_text(*g)}" for g in v.verdict.good[:2]]
-    return lines
+    bad, good = shown_signs(v)
+    return [LEVELS[v.verdict.level], *[f"⚠️ {sign_text(*b)}" for b in bad], *[f"✅ {sign_text(*g)}" for g in good]]
 
 
-def customer_card(v, top_items, now) -> str:
-    """Everything about one customer: the verdict and why, what they owe, their whole
-    history with the shop, lately against before, and what they buy most."""
+def credit_note(margin, credit_share, days_out, monthly_pct) -> str:
+    """"بعد تكلفة الآجل تقريبًا 18%": the margin once credit has waited to be paid, as an estimate."""
+    after = margin_after_credit(margin, credit_share, days_out, monthly_pct)
+    return (f"⏳ بعد تكلفة الآجل: حوالي {after * 100:.0f}% بدل {margin * 100:.0f}% "
+            f"(تقدير: الفلوس بتقعد بره حوالي {weeks_n(max(round(days_out / 7), 1))}، "
+            f"ولو اشتغلت كانت هتكسب {monthly_pct:g}% في الشهر)")
+
+
+def customer_card(v, top_items, now, collect_weeks=6, money_cost=2) -> str:
+    """Everything about one customer: the verdict and why, what they owe and how fast
+    it comes back, their whole history with the shop and what that credit costs,
+    lately against before, and what they buy most."""
     c = v.customer
     lines = [f"👤 {c.name}", *verdict_lines(v), ""]
     lines += account_lines(v, now)
+    days_out = v.collect_days
+    bad, good = shown_signs(v)
+    if days_out is not None and not {"slow_collect", "collects_ok"} & {s for s, _ in bad + good}:
+        lines.append(f"⏱️ التحصيل: فلوسه بتقعد عنده حوالي {weeks_n(max(round(days_out / 7), 1))} "
+                     f"(المفروض {weeks_n(round(collect_weeks))})")
     if v.life_invoices:
         lines.append(f"📊 من أول تعامل ({month(v.first_buy)}): {invoices_n(v.life_invoices)} · "
                      f"{money(v.life_total)} · مكسب {money(v.life_profit)} ({pct(v.life_profit, v.life_total)})")
+        if days_out is not None and v.margin is not None and v.credit_share > 0:
+            lines.append(credit_note(v.margin, v.credit_share, days_out, money_cost))
     if v.before_monthly:
         lines.append(f"📈 آخر 3 شهور: بـ {short_money(v.recent_monthly)} في الشهر (قبلها {short_money(v.before_monthly)})")
     elif v.recent_monthly:
@@ -362,8 +432,9 @@ def verdict_line(v) -> str:
     return f"• {v.customer.name}: مكسب {short_money(v.life_profit)} من أول تعامل{why}"
 
 
-def customers_report(top, levels, new, now, window_days, owing=()) -> str:
-    """levels: {"risk": [...], "watch": [...], "good": [...]} from analysis.by_level()."""
+def customers_report(top, levels, new, now, window_days, owing=(), collect=None, collect_weeks=6) -> str:
+    """levels: {"risk": [...], "watch": [...], "good": [...]} from analysis.by_level().
+    collect: how many days money stays with traders across the shop."""
     out = ["👥 العملاء"]
     if top:
         out.append(f"💵 آخر {window_days} يوم: {plural(len(top), 'عميل واحد', 'عميلين', 'عملاء', 'عميل')} اشتروا بـ "
@@ -371,6 +442,9 @@ def customers_report(top, levels, new, now, window_days, owing=()) -> str:
     if owing:
         out.append(f"💳 على العملاء: {short_money(sum(v.balance for v in owing))} "
                    f"({plural(len(owing), 'عميل واحد', 'عميلين', 'عملاء', 'عميل')})")
+    if collect:
+        out.append(f"⏱️ التحصيل: الفلوس بتقعد عند التجار حوالي {weeks_n(max(round(collect / 7), 1))} "
+                   f"في المتوسط (المفروض {weeks_n(round(collect_weeks))})")
     out.append(f"🟢 كمّل معاهم {len(levels['good'])} · 🟡 خلّي بالك {len(levels['watch'])} · "
                f"🔴 خطر {len(levels['risk'])}")
     if levels["risk"]:
@@ -383,14 +457,70 @@ def customers_report(top, levels, new, now, window_days, owing=()) -> str:
     return "\n".join(out)
 
 
+# --- who bought what ------------------------------------------------------------
+
+def pay_text(g) -> str:
+    if g["credit"] and g["cash"]:
+        return f"آجل {money(g['credit'])} + كاش {money(g['cash'])}"
+    return "آجل" if g["credit"] else "كاش"
+
+
+def items_text(items, limit=4) -> str:
+    """"2 كويل لانوس، 3 حساس ايدل لانوس و2 كمان": the most money first."""
+    ordered = sorted(items.items(), key=lambda x: -x[1]["total"])
+    return names([f"{qty_text(x['qty'])} {name}" for name, x in ordered], limit)
+
+
+def buyers_block(groups, limit=5) -> list:
+    """The biggest buyers of a report, each with what they took; the rest behind a button."""
+    if not groups:
+        return []
+    out = ["", f"👥 مين اشترى ({len(groups)}):"]
+    for g in groups[:limit]:
+        out.append(f"• {g['name']}: {money(g['total'])} ({pay_text(g)})")
+        if g["items"]:
+            out.append(f"🛒 {items_text(g['items'])}")
+    if len(groups) > limit:
+        more = plural(len(groups) - limit, "عميل تاني", "عميلين كمان", "عملاء كمان", "عميل كمان")
+        out.append(f"و{more}: دوس «{BUTTON_SALES}»")
+    return out
+
+
+BUTTON_SALES = "🧾 كل تفاصيل البيع"
+
+
+def sales_page(groups, title, number) -> str:
+    """Every customer of a report with every item and invoice, SALES_PAGE customers a page."""
+    if not groups:
+        return "مفيش فواتير بيع"
+    pages = (len(groups) + SALES_PAGE - 1) // SALES_PAGE
+    number = min(max(number, 0), pages - 1)
+    out = [f"🧾 تفاصيل البيع · {title}"]
+    for g in groups[number * SALES_PAGE:(number + 1) * SALES_PAGE]:
+        out += ["", f"👤 {g['name']}: {money(g['total'])} · مكسب {money(g['profit'])} ({pay_text(g)})",
+                ("فاتورة " if len(g["invoices"]) == 1 else "فواتير ") + names([str(i) for i in g["invoices"]], 8)]
+        ordered = sorted(g["items"].items(), key=lambda x: -x[1]["total"])
+        out += [f"• {qty_text(x['qty'])} {name} · {money(x['total'])}" for name, x in ordered[:15]]
+        if len(ordered) > 15:
+            out.append(f"و{items_n(len(ordered) - 15)} كمان")
+        if g.get("discount", 0) >= 1:
+            out.append(f"• خصم على الفاتورة: {money(g['discount'])}")
+    if pages > 1:
+        out += ["", f"(صفحة {number + 1} من {pages})"]
+    return "\n".join(out)
+
+
 # --- reports -----------------------------------------------------------------
 
-def today(now, t, since_text) -> str:
-    return "\n".join([f"📊 {weekday(now)} ({since_text})", *sales_line(t)])
+def today(now, t, since_text, groups=(), collect=None, money_cost=2) -> str:
+    return "\n".join([f"📊 {weekday(now)} ({since_text})", *sales_line(t, collect, money_cost),
+                      *buyers_block(groups)])
 
 
-def daily_update(now, t, ch, first_time, since_text) -> str:
-    out = [f"📊 تحديث العصر · {weekday(now)} ({since_text})", *sales_line(t)]
+def daily_update(now, t, ch, first_time, since_text, groups=(), buyers=None, collect=None, money_cost=2) -> str:
+    """buyers: {item id: [(customer, pieces)]} sold in the report, for the items that ran out."""
+    out = [f"📊 تحديث العصر · {weekday(now)} ({since_text})", *sales_line(t, collect, money_cost),
+           *buyers_block(groups), ""]
     if first_time:
         out.append("📸 سجلت الأسعار والأرصدة النهارده. من بكره هقولك إيه اللي اتغير.")
         return "\n".join(out)
@@ -400,7 +530,7 @@ def daily_update(now, t, ch, first_time, since_text) -> str:
     if ch["arrived"]:
         out.append(f"📥 وصل بضاعة ({len(ch['arrived'])}): " + names([i.name for i, _ in ch["arrived"]]))
     if ch["ran_out"]:
-        out.append(f"⛔ خلص ({len(ch['ran_out'])}): " + names([i.name for i in ch["ran_out"]]))
+        out.append(f"⛔ خلص ({len(ch['ran_out'])}): " + names([with_buyers(i.name, i.id, buyers) for i in ch["ran_out"]]))
     if ch["new"]:
         out.append(f"🆕 أصناف جديدة ({len(ch['new'])}): " + names([i.name for i in ch["new"]]))
     if not (ch["price"] or ch["arrived"] or ch["ran_out"] or ch["new"]):
@@ -408,16 +538,26 @@ def daily_update(now, t, ch, first_time, since_text) -> str:
     return "\n".join(out)
 
 
-def end_of_day(now, t, ran_out, low, losing, deleted, went_negative, item_names) -> str:
-    out = [f"🌙 آخر اليوم · {weekday(now)}", *sales_line(t)]
+def with_buyers(name, item_id, buyers) -> str:
+    """"كويل لانوس (2 لمركز النجمة و1 لورشة الفجر)": who took it in this report."""
+    took = (buyers or {}).get(item_id)
+    return f"{name} ({buyers_text(took, limit=2)})" if took else name
+
+
+def end_of_day(now, t, ran_out, low, losing, deleted, went_negative, groups=(), buyers=None, collect=None,
+               money_cost=2) -> str:
+    """losing: sale lines (shop.sales_detail) sold below cost; buyers: {item id: [(customer, pieces)]}."""
+    out = [f"🌙 آخر اليوم · {weekday(now)}", *sales_line(t, collect, money_cost), *buyers_block(groups)]
     alerts = []
     if ran_out:
-        alerts.append("• خلص النهارده: " + names([v.item.name for v in ran_out]))
+        alerts.append("• خلص النهارده: " + names([with_buyers(v.item.name, v.item.id, buyers) for v in ran_out]))
     if low:
-        alerts.append("• قرب يخلص: " + names([f"{v.item.name} ({cover_text(v.cover_days)})" for v in low]))
+        alerts.append("• قرب يخلص: " + names([f"{with_buyers(v.item.name, v.item.id, buyers)} يكفي {cover_text(v.cover_days)}"
+                                              for v in low]))
     if losing:
         alerts.append("• اتباع بخسارة: " + names(
-            [f"{item_names.get(x['item'], x['item'])} (خسارة {money(-x['profit'])}، فاتورة {x['invoice']})" for x in losing]))
+            [f"{x['item']} (خسارة {money(-x['profit'])}، فاتورة {x['invoice']} {to_whom(x['customer'])})"
+             for x in losing]))
     if deleted:
         alerts.append(f"• اتمسح من الفواتير: {plural(len(deleted), 'سطر واحد', 'سطرين', 'سطور', 'سطر')} ("
                       + names([d["name"] for d in deleted]) + ")")
@@ -428,7 +568,7 @@ def end_of_day(now, t, ran_out, low, losing, deleted, went_negative, item_names)
 
 
 def weekly(now, week_start, t, prev, top, needed, idle, slow, cheap, negative, top_customer=None,
-           stopped=(), model=None, owed=None, risky=()) -> str:
+           stopped=(), model=None, owed=None, risky=(), collect=None, money_cost=2) -> str:
     out = [f"📅 الأسبوع · {day(week_start)} لـ {day(now)}"]
     sales = f"💵 المبيعات: {money(t['net_total'])}"
     if prev["net_total"]:
@@ -437,6 +577,8 @@ def weekly(now, week_start, t, prev, top, needed, idle, slow, cheap, negative, t
     out.append(sales)
     out.append(f"💰 المكسب: {money(t['net_profit'])} ({pct(t['net_profit'], t['net_total'])})"
                + (f" · آجل {pct(t['credit_total'], t['total'])}" if t["total"] else ""))
+    if collect and t["net_total"] > 0 and t["total"] > 0:
+        out.append(credit_note(t["net_profit"] / t["net_total"], t["credit_total"] / t["total"], collect, money_cost))
     if owed:
         out.append(f"💳 على العملاء: {short_money(owed)}")
 

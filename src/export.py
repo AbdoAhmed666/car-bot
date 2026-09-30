@@ -42,6 +42,7 @@ CREATE TABLE accounts (id INTEGER, name TEXT, opening REAL);
 CREATE TABLE ledger (id INTEGER, account_id INTEGER, date TEXT, debt REAL, credit REAL, balance REAL,
                      payment INTEGER);
 CREATE TABLE forecasts (item_id INTEGER PRIMARY KEY, next_30 REAL);
+CREATE TABLE arrivals (item_id INTEGER PRIMARY KEY, first_in TEXT, last_in TEXT);
 CREATE INDEX ix_invoices_id ON invoices (id);
 CREATE INDEX ix_invoices_date ON invoices (date);
 CREATE INDEX ix_invoices_customer ON invoices (customer_id);
@@ -126,6 +127,14 @@ TABLES = {
         WHERE a.id_Account IN (SELECT c.id_account FROM dbo.cust c WITH (NOLOCK))""",
         lambda r: (_int(r["id"]), _int(r["id_Account"]), _date(r["pdate"]), _num(r["debt"]), _num(r["credit"]),
                    _num(r["balance"]), 1 if _is_set(r["id_CashCome"]) else 0)),
+    # when stock last came in from a supplier, so new goods are not called idle.
+    # Item_store is the stock ledger; purchase entries carry the purchase invoice (id_pur).
+    "arrivals": ("""
+        SELECT s.id_item, MIN(s.pdate) AS first_in, MAX(s.pdate) AS last_in
+        FROM dbo.Item_store s WITH (NOLOCK)
+        WHERE s.come_big > 0 AND s.id_pur IS NOT NULL AND s.id_pur <> 0
+        GROUP BY s.id_item""",
+        lambda r: (_int(r["id_item"]), _date(r["first_in"]), _date(r["last_in"]))),
 }
 
 
@@ -215,6 +224,10 @@ def connect(cfg):
 
 # --- reading and writing ---------------------------------------------------
 
+# tables the bot can do without: if one can't be read, the export goes on without it
+OPTIONAL = {"arrivals"}
+
+
 def read_source(conn) -> dict:
     """{snapshot table: [row tuples]} read from the shop's database."""
     pyodbc = _odbc()
@@ -226,6 +239,10 @@ def read_source(conn) -> dict:
         try:
             cur.execute(sql)
         except pyodbc.Error as e:
+            if name in OPTIONAL:
+                print(f"skipped {name}: {e}", file=sys.stderr)
+                out[name] = []
+                continue
             raise ExportError(f"{name}: {e}") from e
         cols = [c[0] for c in cur.description]
         out[name] = [row(dict(zip(cols, r))) for r in cur.fetchall()]
