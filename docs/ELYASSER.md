@@ -38,7 +38,7 @@ Tables that matter:
 | `Sal_Invoice` / `Sal_Details` | sales: header (`pdate`, `id_cust`, `Total`, `Profit`) and lines (`id_item`, `unit`, `qu`, `pr`, `total_item`, `profit`) |
 | `Rsal_invoice` / `Rsal_details` | sales returns (negative profit) |
 | `Pur_Invoice` / `Pur_Details`, `RPur_*` | purchases and purchase returns |
-| `Item_store` | stock ledger: every in/out movement with its date and source document |
+| `Item_store` | stock ledger: every in/out movement with its date and source document (`come_big`/`out_big`; `id_pur` for a purchase, `id_sal`, `id_rsal`, `id_rpur`). Purchases give each item's first and last arrival, so goods just in are not called idle |
 | `Sal_Deleted` | lines deleted from sales invoices |
 | `cust`, `Tree`, `Tree_Account` | customers/suppliers, their accounts, and every account entry (`debt`, `credit`, `id_sal` for a sale, `id_CashCome` for a payment) |
 

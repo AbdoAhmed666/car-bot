@@ -39,6 +39,9 @@ class FakeReports:
     def end_of_day(self, save=True):
         return self._call("eod", save)
 
+    def sales_page(self, after, upto, number=0):
+        return self._call("sales", after, upto, number)
+
     def ask(self, text):
         self.calls.append(("ask", text))
         if self.fail:
@@ -91,6 +94,15 @@ def test_buttons_under_messages(cfg):
     assert item.edit and page.edit and not opened.edit            # paging replaces, opening sends new
     assert reports.calls == [("item", 6), ("list", "low", 2), ("list", "idle", 0)]
     assert c.on_button(111, "list:low:x") == [] and c.on_button(111, "junk") == []
+
+
+def test_sales_details_buttons(cfg):
+    c, reports = chat(cfg)
+    (opened,) = c.on_button(111, "sales:3074:3087")          # under a report: a new message
+    (turned,) = c.on_button(111, "sales:3074:3087:1")        # its pages replace it
+    assert not opened.edit and turned.edit
+    assert reports.calls == [("sales", 3074, 3087, 0), ("sales", 3074, 3087, 1)]
+    assert c.on_button(111, "sales:x:1") == [] and c.on_button(111, "sales:1") == []
 
 
 def test_previews_dont_move_memory_but_schedule_does(cfg):

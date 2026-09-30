@@ -59,6 +59,7 @@ ITEMS = [
     ("اويل سيل صباب لانسر", 95, 0.3, 37, "idle:300"),
     ("خرطوم تكيف سيراتو 2015", 300, 0.0, 10, "never"),
     ("طقم تيل امامي سيراتو", 450, 0.0, 0, "never"),
+    ("مساعدين امامي كروز", 520, 0.0, 12, "new:10"),             # arrived 10 days ago, no sale yet: not idle
     ("صنف قديم ممسوح", 10, 0.2, 5, "deleted"),
 ]
 
@@ -81,6 +82,9 @@ CUSTOMERS = [
     ("مورد قطع غيار", 0, "supplier"),              # sells to the shop, never buys
 ]
 STOPPED_PAYING = {"مؤسسة التوفيق": 50}               # still buys, last paid this many days ago
+# every 10 days a customer pays about this share of what they owe: 0.3 brings the money back
+# in about 5 weeks; the slow one keeps about 13 weeks of purchases, though he pays regularly
+PAY_SHARE = {"معرض الشروق": 0.11}
 CASH_ACCOUNT = 26                                 # "الدرج": not a customer account
 
 
@@ -199,8 +203,9 @@ def build(seed=42) -> dict:
         if back % 10 == 0:              # customers pay part of what they owe
             for c in customers[1:]:
                 if c["share"] and c["first"] <= day <= c["last"]:
-                    amount = round(rng.uniform(2000, 15000), -2)
-                    if back >= STOPPED_PAYING.get(c["name"], 0):
+                    owed = max(running.get(c["account"], 0.0), 0.0)
+                    amount = round(owed * PAY_SHARE.get(c["name"], 0.3) * rng.uniform(2000, 15000) / 8500, -2)
+                    if amount > 0 and back >= STOPPED_PAYING.get(c["name"], 0):
                         ledger(c["account"], day + timedelta(hours=19), credit=amount, payment=True)
 
     # ANCHOR: the day the end-of-day report is tested on
@@ -222,6 +227,29 @@ def build(seed=42) -> dict:
     t["Rsal_details"].append({"id": ids["ret_line"], "id_RSal": ids["ret"], "id_item": mob["id"], "unit": 0, "qu": 1.0,
                               "pr": mob["price"], "total_item": mob["price"], "Profit": -(mob["price"] - mob["cost"])})
 
+    # the stock ledger: every item came in when the shop started; the ones still selling were
+    # restocked 25 days ago; the new one arrived 10 days ago. A customer return and a sale also
+    # move stock but are not arrivals from a supplier.
+    t["Item_store"] = []
+
+    def movement(item, when, come=0.0, out=0.0, pur=None, rsal=None, sal=None):
+        t["Item_store"].append({"id": len(t["Item_store"]) + 1, "id_item": item["id"], "id_store": 20,
+                                "come_big": come, "out_big": out, "pdate": when, "id_pur": pur,
+                                "id_rsal": rsal, "id_sal": sal})
+
+    start = ANCHOR - timedelta(days=DAYS + 5)
+    for item in items:
+        if item["profile"].startswith("new"):
+            movement(item, ANCHOR - timedelta(days=int(item["profile"].split(":")[1]), hours=-11), come=item["stock"],
+                     pur=500 + item["id"])
+            continue
+        movement(item, start, come=max(item["stock"], 0) + 50, pur=item["id"])
+        if item["profile"] == "sells":
+            movement(item, ANCHOR - timedelta(days=25, hours=-12), come=10, pur=300 + item["id"])
+    idle_item = next(i for i in items if i["profile"].startswith("idle"))
+    movement(idle_item, ANCHOR - timedelta(days=5), come=1, pur=0, rsal=1)      # a return: not an arrival
+    movement(idle_item, ANCHOR - timedelta(days=200), out=1, sal=1)             # a sale: not an arrival
+
     t["Item"] = [{"id_item": i["id"], "ARname": i["name"], "InternationalCode": f"0{1000 + i['id']}",
                   "IdTypeItem1": 1, "PurchasePrice": i["cost"], "BigPr0": i["price"], "Minimum": 0,
                   "Day_Recession": 0, "CountMiddel": 1, "CountSmall": 1, "Balance": 0, "CurrentBalance0": i["stock"],
@@ -238,7 +266,7 @@ def build(seed=42) -> dict:
 # ELYASSER table -> the snapshot table src/export.py fills from it
 SNAPSHOT_TABLE = {"Item": "items", "cust": "customers", "Sal_Invoice": "invoices", "Sal_Details": "invoice_lines",
                   "Rsal_invoice": "returns", "Rsal_details": "return_lines", "Sal_Deleted": "deleted_lines",
-                  "Tree": "accounts", "Tree_Account": "ledger"}
+                  "Tree": "accounts", "Tree_Account": "ledger", "Item_store": "arrivals"}
 
 
 def source_rows(seed=42) -> dict:
@@ -247,6 +275,12 @@ def source_rows(seed=42) -> dict:
     customer_accounts = {c["id_account"] for c in t["cust"]}
     t["Tree"] = [r for r in t["Tree"] if r["id"] in customer_accounts]
     t["Tree_Account"] = [r for r in t["Tree_Account"] if r["id_Account"] in customer_accounts]
+    arrivals = {}
+    for r in t["Item_store"]:                   # what the arrivals query groups, done here
+        if (r["come_big"] or 0) > 0 and r["id_pur"]:
+            first, last = arrivals.get(r["id_item"], (r["pdate"], r["pdate"]))
+            arrivals[r["id_item"]] = (min(first, r["pdate"]), max(last, r["pdate"]))
+    t["Item_store"] = [{"id_item": k, "first_in": a, "last_in": b} for k, (a, b) in arrivals.items()]
     return {SNAPSHOT_TABLE[name]: rows for name, rows in t.items()}
 
 

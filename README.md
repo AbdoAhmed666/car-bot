@@ -17,7 +17,7 @@ auto-parts shop since September 2026.
   <tr>
     <td align="center">The weekly report leads with 3 actions</td>
     <td align="center">A trader: verdict, reasons, history</td>
-    <td align="center">An item; traders who could cause trouble</td>
+    <td align="center">An item and who bought it; risky traders</td>
   </tr>
 </table>
 
@@ -33,12 +33,18 @@ auto-parts shop since September 2026.
   "تقرير الأسبوع" or "مين ممكن يعملي مشكلة" work as well as the buttons.
 - **Reports on its own**: an update after Asr, an end-of-day report that only
   raises alarms that matter (ran out, sold below cost, a line deleted from an
-  invoice), and a weekly report that opens with the three things to do.
+  invoice), and a weekly report that opens with the three things to do. Each
+  day's report says who bought, for how much and what, with every invoice
+  number one tap away, so each figure can be checked in the program.
 - **Stock**: shortages ranked by what they bring in a week, with how many to
-  order; idle stock with the money stuck in it; slow movers.
+  order; idle stock with the money stuck in it (goods that arrived lately are
+  not idle yet); slow movers. An item's card shows who bought it and its last invoices.
 - **Traders**: keep going 🟢, watch out 🟡 or risky 🔴, with the numbers behind
-  it: stopped buying, stopped paying, takes more on credit than they pay, owes
-  many months of purchases, buys much less than before, low margin, returns.
+  it: stopped buying, stopped paying, takes more on credit than they pay, keeps
+  the shop's money longer than 6 weeks, buys much less than before, low margin,
+  returns.
+- **Credit has a cost**: margins are also shown after what the money waiting
+  with traders would have earned, as a clearly marked estimate.
 
 ## How it works
 
@@ -133,12 +139,18 @@ First run on the real data (68 weeks, ~1,100 items):
 | stopped buying | 3× their usual gap between purchases and 21+ days | risky if they owe 5,000+ EGP |
 | not paying | owes 1,000+, no payment for 30+ days and twice their usual gap | risky if they owe 5,000+ EGP |
 | takes more than they pay | paid under 50% (80%) of what they took on credit in 90 days, debt up 10,000+ (5,000+) | risky (watch out) |
-| owes many months | debt = 6+ (3+) months of their credit purchases, unless it is coming down | risky (watch out) |
+| slow to collect | what they owe, in days of what they take on credit (collection days): over 2× the shop's norm of 6 weeks and 5,000+ EGP, unless it is coming down (over the norm) | risky (watch out) |
 | buys less | 50%+ less per month than before | watch out |
 | low margin / returns | under half the shop's margin / 10%+ sent back | watch out |
 
-Good signs are shown too (pays as they go, pays old debt down, buys more,
-better margin). Risky traders are listed by money at stake. This is a
+Good signs are shown too (pays as they go, pays old debt down, collects
+within the norm, buys more, better margin). Risky traders are listed by money at stake.
+
+**What credit costs.** A sale on credit earns its margin only when it is paid.
+Until then the money could be working elsewhere, so the bot also shows an
+estimate: margin − credit share × (monthly rate × collection days / 30). With
+a 22% margin, 85% on credit, 7 weeks to collect and 2% a month, that is about
+19%. The norm (`COLLECT_WEEKS=6`) and the rate (`MONEY_COST_MONTHLY=2`) are settings. This is a
 rule-based score on purpose: there is no record of which traders actually
 defaulted to learn from, and the owner has to see *why*.
 

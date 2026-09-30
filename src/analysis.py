@@ -17,6 +17,8 @@ class ItemView:
     per_day: float = 0.0        # expected daily sales: the model's forecast, or the window's average
     last_sale: datetime = None  # latest sale ever (None = never sold)
     forecast_30: float = None   # the model's forecast for the next 30 days, when it is used
+    first_arrival: datetime = None  # when stock first / last came in from a supplier (None = unknown)
+    last_arrival: datetime = None
 
     @property
     def cover_days(self):
@@ -31,13 +33,15 @@ class ItemView:
         return max(self.item.stock, 0) * self.item.cost
 
 
-def views(items, sales, last_sales, window_days, forecasts=None) -> dict:
+def views(items, sales, last_sales, window_days, forecasts=None, arrivals=None) -> dict:
     """One ItemView per item. sales: {id: ItemSales} over the last `window_days`.
-    forecasts: {id: pieces in the next 30 days}; when given, the pace comes from it."""
+    forecasts: {id: pieces in the next 30 days}; when given, the pace comes from it.
+    arrivals: {id: (first, last) time stock came in}, when the snapshot has them."""
     out = {}
     for i in items:
         s = sales.get(i.id)
-        v = ItemView(item=i, last_sale=last_sales.get(i.id))
+        first, last = (arrivals or {}).get(i.id, (None, None))
+        v = ItemView(item=i, last_sale=last_sales.get(i.id), first_arrival=first, last_arrival=last)
         if s:
             v.sold, v.revenue, v.profit = max(s.qty, 0), s.revenue, s.profit
             v.per_day = v.sold / window_days
@@ -61,17 +65,22 @@ def reorder_qty(view, days=30) -> int:
     return max(1, math.ceil(view.per_day * days - max(view.item.stock, 0)))
 
 
-def slow_movers(all_views, min_cover_days=180) -> list:
-    """Items that still sell, but so slowly that the stock lasts half a year or more."""
-    slow = [v for v in all_views if v.sold > 0 and v.item.stock > 0 and v.cover_days >= min_cover_days]
+def slow_movers(all_views, min_cover_days=180, new_since=None) -> list:
+    """Items that still sell, but so slowly that the stock lasts half a year or more.
+    Items first stocked after `new_since` are left out: too new to judge their pace."""
+    slow = [v for v in all_views if v.sold > 0 and v.item.stock > 0 and v.cover_days >= min_cover_days
+            and not (new_since and v.first_arrival and v.first_arrival >= new_since)]
     return sorted(slow, key=lambda v: -v.money)
 
 
 def idle(all_views, now, idle_days) -> list:
-    """In stock, and no sale for `idle_days` or more (or never). Most money first."""
+    """In stock, no sale for `idle_days` or more (or never), and nothing new came in
+    from a supplier in that time either: goods that just arrived are not idle yet.
+    Most money first."""
     cutoff = now - timedelta(days=idle_days)
     out = [v for v in all_views
-           if v.item.stock > 0 and (v.last_sale is None or v.last_sale < cutoff)]
+           if v.item.stock > 0 and (v.last_sale is None or v.last_sale < cutoff)
+           and (v.last_arrival is None or v.last_arrival < cutoff)]
     return sorted(out, key=lambda v: -v.money)
 
 
@@ -128,6 +137,52 @@ def totals(invoices, returns=()) -> dict:
     return t
 
 
+def sales_by_customer(invoices, detail, names=None) -> list:
+    """Who bought what: one entry per customer, the biggest first. Money comes from the
+    invoices (net of the cash discount, as in the program), the items from their lines:
+    {"name", "invoices": [ids], "total", "profit", "credit", "cash", "discount",
+     "items": {item name: {"qty", "total"}}}."""
+    names = {**{r["customer_id"]: r["customer"] for r in detail if r["customer"]}, **(names or {})}
+    lines = {}
+    for r in detail:
+        lines.setdefault(r["invoice"], []).append(r)
+    groups = {}
+    for inv in invoices:
+        g = groups.setdefault(inv["customer"], {"name": names.get(inv["customer"]) or f"عميل رقم {inv['customer']}",
+                                                "invoices": [], "total": 0.0, "profit": 0.0, "credit": 0.0,
+                                                "cash": 0.0, "discount": 0.0, "items": {}})
+        g["invoices"].append(inv["id"])
+        g["total"] += inv["total"]
+        g["discount"] += inv.get("discount") or 0.0
+        g["profit"] += inv["profit"]
+        g["credit" if inv["credit"] else "cash"] += inv["total"]
+        for r in lines.get(inv["id"], []):
+            item = g["items"].setdefault(r["item"], {"qty": 0.0, "total": 0.0})
+            item["qty"] += r["qty"]
+            item["total"] += r["total"]
+    return sorted(groups.values(), key=lambda g: -g["total"])
+
+
+def buyers_by_item(detail) -> dict:
+    """{item id: [(customer, pieces)]} for the lines given, most pieces first."""
+    out = {}
+    for r in detail:
+        per = out.setdefault(r["item_id"], {})
+        per[r["customer"]] = per.get(r["customer"], 0) + r["qty"]
+    return {i: sorted(per.items(), key=lambda x: -x[1]) for i, per in out.items()}
+
+
+def credit_cost(days_out, monthly_pct) -> float:
+    """What money left with a trader for `days_out` days costs, as a share of it:
+    what it could have earned elsewhere at `monthly_pct` % a month."""
+    return monthly_pct / 100 * days_out / 30
+
+
+def margin_after_credit(margin, credit_share, days_out, monthly_pct) -> float:
+    """The profit margin once the credit part of the sales has waited `days_out` days to be paid."""
+    return margin - credit_share * credit_cost(days_out, monthly_pct)
+
+
 def losing_lines(lines) -> list:
     """Sale lines sold below cost."""
     return [line for line in lines if line["profit"] < -0.01]
@@ -169,11 +224,13 @@ class CustomerView:
     life_total: float = 0.0       # returns subtracted
     life_profit: float = 0.0
     life_returns: float = 0.0
+    life_credit_total: float = 0.0
     # the last RECENT_DAYS against before
     recent_monthly: float = 0.0   # bought per month lately
     before_monthly: float = None  # per month before that; None with under two months of history
     balance_before: float = None  # what they owed RECENT_DAYS ago
     bought_recent: float = 0.0    # taken on credit lately
+    recent_days: float = RECENT_DAYS  # how long "lately" is for them: shorter for a new customer
     paid_recent: float = 0.0      # paid lately
     verdict: object = None        # Verdict, from rate()
 
@@ -192,11 +249,16 @@ class CustomerView:
         return self.balance - self.balance_before
 
     @property
-    def debt_months(self):
-        """What they owe, in months of what they take on credit lately."""
+    def collect_days(self):
+        """About how long their money stays out: what they owe, in days of what they
+        took on credit lately. None if they owe little or took nothing lately."""
         if self.balance is None or self.balance < 1000 or self.bought_recent <= 0:
             return None
-        return self.balance / (self.bought_recent / (RECENT_DAYS / 30))
+        return self.balance / (self.bought_recent / self.recent_days)
+
+    @property
+    def credit_share(self):
+        return min(max(self.life_credit_total / self.life_total, 0.0), 1.0) if self.life_total > 0 else 0.0
 
     @property
     def activity_change(self):
@@ -245,10 +307,12 @@ def customer_views(customers, window, lifetime, purchase_days, balances=None, re
             v.monthly = life["total"] / months
             v.life_invoices, v.life_total, v.life_profit = life["invoices"], life["total"], life["profit"]
             v.life_returns = life.get("returns", 0.0)
+            v.life_credit_total = life.get("credit_total", 0.0)
+        if now and v.first_buy:
+            v.recent_days = max(min(RECENT_DAYS, (now - v.first_buy).days), 1)
         if recent is not None:
             # a customer newer than the window: per month of the time they have been buying
-            days = RECENT_DAYS if not (now and v.first_buy) else min(RECENT_DAYS, (now - v.first_buy).days)
-            v.recent_monthly = recent.get(c.id, {}).get("total", 0.0) / max(1.0, days / 30)
+            v.recent_monthly = recent.get(c.id, {}).get("total", 0.0) / max(1.0, v.recent_days / 30)
         old = (before or {}).get(c.id)
         if old and cutoff and (cutoff - old["first"]).days >= 60:
             v.before_monthly = old["total"] / ((cutoff - old["first"]).days / 30)
@@ -327,10 +391,11 @@ def is_late(v, now) -> bool:
             and since >= max(30, 2 * (v.usual_pay_gap or 0)))
 
 
-def assess(v, now, shop_margin=None) -> Verdict:
+def assess(v, now, shop_margin=None, collect_days=42) -> Verdict:
     """Is this customer worth the credit? Each sign carries the numbers behind it,
     so the owner can judge for himself. Money at stake decides how serious it is:
-    5,000+ owed turns a warning about stopping or not paying into a risk."""
+    5,000+ owed turns a warning about stopping or not paying into a risk.
+    collect_days: how soon the shop expects credit back (6 weeks)."""
     risk, watch, good = [], [], []
     owes = v.balance is not None and v.balance >= 1000
     big = owes and v.balance >= 5000
@@ -350,12 +415,15 @@ def assess(v, now, shop_margin=None) -> Verdict:
             good.append(("pays_well", {"ratio": ratio, "growth": growth, "balance": v.balance}))
     # a lot owed counts less against someone who is bringing it down
     shrinking = growth is not None and growth <= -0.05 * max(v.balance or 0, 1)
-    months = v.debt_months
-    if months is not None and v.balance >= 5000:
-        if months >= 6 and v.balance >= 20_000:
-            (watch if shrinking else risk).append(("debt_months", {"months": months, "balance": v.balance}))
-        elif months >= 3 and not shrinking:
-            watch.append(("debt_months", {"months": months, "balance": v.balance}))
+    days = v.collect_days
+    if days is not None:
+        numbers = {"weeks": days / 7, "norm": collect_days / 7, "balance": v.balance, "shrinking": shrinking}
+        if days > 2 * collect_days and v.balance >= 5000 and not shrinking:
+            risk.append(("slow_collect", numbers))
+        elif days > collect_days:
+            watch.append(("slow_collect", numbers))
+        else:
+            good.append(("collects_ok", numbers))
     change = v.activity_change
     if change is not None and not gone:
         if change <= -0.5:
@@ -382,12 +450,20 @@ def shop_margin(cviews) -> float:
     return sum(v.life_profit for v in cviews) / total if total > 0 else None
 
 
-def rate(cviews, now) -> None:
+def rate(cviews, now, collect_days=42) -> None:
     """Give every customer a verdict against the shop's own average margin."""
     cviews = list(cviews)
     margin = shop_margin(cviews)
     for v in cviews:
-        v.verdict = assess(v, now, margin)
+        v.verdict = assess(v, now, margin, collect_days)
+
+
+def shop_collect_days(cviews):
+    """About how long money stays with traders across the shop: all they owe, in days
+    of what they all took on credit lately. None without balances."""
+    owed = sum(v.balance for v in cviews if v.balance is not None and v.balance > 0)
+    daily = sum(v.bought_recent / v.recent_days for v in cviews)
+    return owed / daily if daily > 0 and owed > 0 else None
 
 
 def by_level(cviews, level) -> list:
