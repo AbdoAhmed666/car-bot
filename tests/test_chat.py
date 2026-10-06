@@ -108,7 +108,7 @@ def test_sales_details_buttons(cfg):
 def test_previews_dont_move_memory_but_schedule_does(cfg):
     c, reports = chat(cfg)
     c.on_text(111, "/eod")
-    c.on_text(111, "/daily@Elbaraga_car_bot")
+    c.on_text(111, "/daily@shop_assistant_bot")
     c.on_text(111, "/weekly")
     c.scheduled("eod")
     assert reports.calls == [("eod", False), ("daily", False), ("weekly",), ("eod", True)]
